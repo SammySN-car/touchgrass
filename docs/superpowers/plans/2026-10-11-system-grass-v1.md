@@ -1,723 +1,448 @@
-# SYSTEM://GRASS v1 Implementation Plan
+# SYSTEM://GRASS — v1 Implementation Reference & Build Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Purpose:** Complete build reference for the Touch Grass challenge entry (Hacktoberfest 2026 Week 1, "Touch Grass"). Everything needed to implement v1 with zero prior context: architecture, data flow, module contracts, design rationale, and a task-by-task TDD build order.
+>
+> **Positioning:** Local-first outdoor quest game. Phone browser is a thin terminal; a laptop runs FastAPI + SQLite + Ollama (Gemma). No cloud, no accounts, no keys. Demo = video; submission window ends **2026-10-11 23:59 PDT (= 2026-10-12 12:29 IST)**.
+>
+> **Status (locked):** Design frozen in `docs/design.md`. State machine (`app/state.py`) already implemented — 14 tests green. This document is the execution reference from that point forward.
 
-**Goal:** Ship a local-first outdoor quest game (daily quest -> photo evidence -> rules verdict + Gemma narration -> XP/rank/penalty) as a mobile web app served from a laptop, with a DEMO VIDEO and DEV post before the Hacktoberfest Week 1 deadline (2026-10-11 23:59 PDT = 2026-10-12 12:29 IST).
+## Contents
 
-**Architecture:** Python FastAPI backend + SQLite single-player state. Quests come from a hand-written template pool; Gemma (Ollama, local) supplies one flavor line and the verdict narration as JSON; rules tier is authoritative for PASS/FAIL; canned fallback banks keep the game alive when Ollama is down (also serves as demo mode via GRASS_MOCK=1). Frontend is a 4-screen mobile-first vanilla JS app with no build tooling, served by FastAPI on the LAN.
-
-**Tech Stack:** Python 3.13, FastAPI 0.128, uvicorn 0.40, Pillow 11, pytest 9, requests, python-multipart, SQLite, Ollama (`gemma3:4b` primary, `llama3.2` fallback).
-
-**Spec:** `docs/design.md` (frozen v1 design). This plan argues from that spec.
-
-## Global Constraints
-
-- No cloud, no accounts, no API keys, no push notifications. LAN only.
-- Model: env `GRASS_MODEL` default `gemma3:4b`; automatic fallback chain `[model, llama3.2, qwen2.5:7b]`.
-- `GRASS_MOCK=1` forces canned narration (tests + demo resilience). Tests NEVER require a live Ollama.
-- Rules tier decides PASS/FAIL. The model may ONLY narrate; a model verdict contradicting rules is discarded.
-- Photos: JPEG only, client-compressed target <=200KB, server re-compresses max side 1280px.
-- Ranks F..S thresholds 0/100/250/500/850/1300/2000; FAIL_XP_PENALTY=30; streak bonus 5/day cap 25; perfect +20.
-- No Solo Leveling IP anywhere in code, copy, README, or post. Disclaimer line stays in README.
-- Commit after every task. Exact-path `git add` only.
-- Deadline: target DEMO VIDEO by 10:30 IST, DEV post submitted by 11:30 IST.
-
-## Review Focus (failure modes tests must pin)
-
-1. **Ollama unreachable or times out mid-verdict** -> submit still returns a canned PASS/FAIL verdict; game continues. Owned by Task 5 (judge) and Task 7 (service).
-2. **Model narration contradicts the rules verdict** (says PENALTY on passing evidence) -> rules verdict wins; narration swapped to canned. Owned by Task 5.
-3. **Same-day re-open double-issues a quest or double-applies state** -> quest issuance idempotent per day; evidence after verdict rejected politely. Owned by Task 4 + Task 7.
-4. **Missed-yesterday demotion mis-fires** (user passed yesterday -> no demotion; user has no quest record yesterday -> no demotion; quest issued yesterday with no verdict -> demote). Owned by Task 7.
-5. **Hostile uploads** (non-image bytes, absurd file size, captured_at far in the past) -> 4xx with system-voice error; never a 500. Owned by Task 6 + Task 8.
+1. [What we are building](#1-what-we-are-building)
+2. [Architecture (system diagram)](#2-architecture-system-diagram)
+3. [Flow charts — quest lifecycle & evidence pipeline](#3-flow-charts--quest-lifecycle--evidence-pipeline)
+4. [Tech stack & why](#4-tech-stack--why)
+5. [Module map & file responsibilities](#5-module-map--file-responsibilities)
+6. [Data model (SQLite schema)](#6-data-model-sqlite-schema)
+7. [API contract](#7-api-contract)
+8. [Judging model — rules tier vs model tier](#8-judging-model--rules-tier-vs-model-tier)
+9. [State machine contract (already shipped)](#9-state-machine-contract-already-shipped)
+10. [Frontend screens](#10-frontend-screens)
+11. [Design decisions (locked vs open)](#11-design-decisions-locked-vs-open)
+12. [Build tasks (TDD order)](#12-build-tasks-tdd-order)
+13. [Global constraints](#13-global-constraints)
+14. [Review focus — failure modes that must be pinned](#14-review-focus--failure-modes-that-must-be-pinned)
+15. [Gotchas (host-specific)](#15-gotchas-host-specific)
+16. [Milestones & deadline plan](#16-milestones--deadline-plan)
 
 ---
 
-### Task 1: State machine (ALREADY IMPLEMENTED - verify only)
+## 1. What we are building
 
-**Files:**
-- Exists: `app/state.py`
-- Exists: `tests/test_state.py`
+A single-player, daily outdoor quest game with a **harsh-but-funny "System" persona**. Each day the System issues one outdoor quest ("SKY CHECK: photograph the sky from outside"). The player submits photos; a deterministic **rules tier** decides PASS/FAIL; a **local Gemma model** narrates the verdict in the System's voice. XP, ranks (F→S), streaks, and penalties persist in SQLite.
 
-**Interfaces (later tasks rely on these exact names):**
-- `PlayerState(xp:int, rank_index:int, streak:int, last_pass_day:date|None)` frozen dataclass; `.rank -> str`
-- `apply_pass(state, base_xp:int, day:date, perfect:bool=False) -> tuple[PlayerState, list[Event]]`
-- `apply_fail(state) -> tuple[PlayerState, list[Event]]`
-- `apply_ignore(state) -> tuple[PlayerState, list[Event]]`
-- `Event(kind:str, detail:str)` kinds: XP_GAINED, XP_LOST, RANK_UP, RANK_DOWN, STREAK_BROKEN
-- `RANKS = ("F","E","D","C","B","A","S")`, `THRESHOLDS = (0,100,250,500,850,1300,2000)`
+Design pillars (user-locked):
 
-- [x] Step 1: Implemented in this session (14 tests, red->green history preserved).
-- [ ] Step 2: Verify green.
+- **Phone-as-terminal.** No app install. The phone's browser hits the laptop over LAN.
+- **Local brain.** Quest flavor + verdict narration come from Ollama running Gemma on the laptop. If the model is down, canned banks keep the game alive — this doubles as the demo-resilience story and the `GRASS_MOCK=1` test mode.
+- **Rules are law.** The model never decides PASS/FAIL. It may only narrate a decision that code already made. If it disagrees, its line is discarded.
+- **Fun first, nudge second.** Personal daily game; the outdoor nudge is a side effect, not a health product. (Health framing deliberately dropped from design.)
 
-Run: `python -m pytest tests/test_state.py -q`
-Expected: `14 passed`
+What v1 is **not** (hard cuts, listed for scope honesty in the DEV post): Inner Demon, shop, regression token, raids, duels, persona pack, on-device CLIP, VLM/image judging, audio quests, push notifications, auth, cloud keys.
 
-- [ ] Step 3: Commit if uncommitted.
+---
 
-```bash
-git add app/state.py tests/test_state.py app/__init__.py tests/__init__.py
-git commit -m "feat: state machine for ranks, xp, streaks, penalties"
+## 2. Architecture (system diagram)
+
+```text
+┌────────────────────────── PHONE (any browser, same Wi-Fi) ──────────────────────────┐
+│  static/index.html  +  app.js  +  style.css                                          │
+│  ┌─────────────┐   ┌──────────────┐   ┌──────────────┐   ┌───────────┐              │
+│  │ Quest Window│──▶│Evidence      │──▶│ Verdict      │──▶│ Log       │  (4 screens │
+│  │ rank/XP bar │   │Capture(camera)│   │ PASS/PENALTY │   │ timeline  │   toggled)  │
+│  └─────────────┘   └──────┬───────┘   └──────────────┘   └───────────┘              │
+└───────────────────────────┼──────────────────────────────────────────────────────────┘
+                            │  fetch() JSON + multipart (LAN, http)
+                            ▼
+┌─────────────────────────── LAPTOP (FastAPI, uvicorn :8000) ─────────────────────────┐
+│  app/main.py            routes: /api/state /api/evidence /api/log /api/health       │
+│       │                                                                             │
+│       ▼                                                                             │
+│  app/service.py         orchestration: issue-quest, submit, ignore-check            │
+│       │            ┌────────────────────┬───────────────────┐                       │
+│       ▼            ▼                    ▼                   ▼                       │
+│  app/state.py   app/quests.py      app/judge.py        app/images.py               │
+│  (XP/rank/      (14 templates,     (rules tier +       (Pillow JPEG                 │
+│   streak pure    anti-repeat,       narration)          ≤200KB /                   │
+│   functions)     flavor)                                1280px)                     │
+│       │            │                    │                                           │
+│       ▼            ▼                    ▼                                           │
+│  grass.db (SQLite: player/quests/evidence/verdicts/template_usage)                 │
+│                            evidence/ (compressed JPEGs on disk)                    │
+│                                                                                     │
+│                            app/ollama_client.py                                    │
+│                                    │  (only if not GRASS_MOCK)                     │
+└────────────────────────────────────┼────────────────────────────────────────────────┘
+                                     ▼
+                     ┌──────── Ollama (localhost:11434) ────────┐
+                     │  gemma3:4b  (primary — VRAM ~4GB)        │
+                     │  llama3.2   (fallback)                   │
+                     │  qwen2.5:7b (fallback)                   │
+                     │  JSON-only replies: {flavor}/{verdict,line}│
+                     └──────────────────────────────────────────┘
 ```
 
+Key properties the diagram encodes:
+
+- **One trust boundary:** the laptop is the whole game; the phone is a display + camera. No auth because there is nothing to guard beyond one player's own fun on a private LAN.
+- **One model boundary:** `app/ollama_client.py` is the *only* module that talks to Ollama. Everything else calls it or the canned banks.
+- **Everything else is deterministic.** State machine, rules tier, template pool, image compression — all pure or I/O-predictable, all unit-testable without a model.
+
 ---
 
-### Task 2: Database layer
+## 3. Flow charts — quest lifecycle & evidence pipeline
 
-**Files:**
-- Create: `app/db.py`
-- Test: `tests/test_db.py`
+### 3a. Daily quest lifecycle (state + quest issuance)
 
-**Interfaces:**
-- Consumes: nothing.
-- Produces: `connect() -> sqlite3.Connection` (Row factory), `init_db() -> None`, `DB_PATH: Path`. Tables: `player(id=1,xp,rank_index,streak,last_pass_day)`, `quests(id,day UNIQUE,template_id,title,objective,target_count,deadline_hour,xp_reward,difficulty,issued_at,flavor)`, `evidence(id,quest_id,path,captured_at,uploaded_at)`, `verdicts(id,quest_id,passed,xp_delta,rank_before,rank_after,streak_after,line,flavor,model_used,events_json,created_at)`, `template_usage(template_id PK,times_used)`.
+```text
+        ┌──────────────┐
+        │  new day     │  player opens app (GET /api/state)
+        └──────┬───────┘
+               ▼
+   ┌───────────────────────┐     yes    ┌────────────────────────┐
+   │ quest exists for      │──────────▶ │ return it (idempotent)│──┐
+   │ today?                │            └────────────────────────┘  │
+   └───────┬───────────────┘                                        │
+           │ no                                                     │
+           ▼                                                        │
+   ┌───────────────────────┐     yes    ┌────────────────────────┐  │
+   │ quest exists for      │  no verdict│ apply_ignore(state)    │  │
+   │ YESTERDAY, and        │──────────▶ │ demote −1 rank step,   │  │
+   │ never got a verdict?  │            │ reset streak, record   │  │
+   └───────┬───────────────┘            │ synthetic verdict row  │  │
+           │ no / already judged        └───────────┬────────────┘  │
+           ▼                                        │               │
+   ┌───────────────────────┐                        │               │
+   │ pick_template(conn)   │◀───────────────────────┘               │
+   │ (least-used bias,     │                                        │
+   │  14-tuple pool)       │                                        │
+   └───────┬───────────────┘                                        │
+           ▼                                                        │
+   ┌───────────────────────┐  fails / mock  ┌────────────────────┐  │
+   │ gemma_flavor(title,   │───────────────▶│ CANNED_FLAVOR line │  │
+   │ objective)            │                └────────┬───────────┘  │
+   └───────┬───────────────┘                         │              │
+           │ model OK                                │              │
+           ▼                                         ▼              │
+   ┌───────────────────────────────────────────────────────────┐   │
+   │ INSERT quests (day UNIQUE) + upsert template_usage        │   │
+   └───────────────────────────────┬───────────────────────────┘   │
+                                   └───────────────────────────────┘
+```
 
-- [ ] **Step 1: Failing test**
+Notes:
+- **Same-day re-open never re-issues** (Review Focus #3). `day` carries a UNIQUE constraint; the lookup short-circuits.
+- **Ignore only fires when the record proves it** (Review Focus #4): a quest row for yesterday *and* no verdict for it. A fresh DB, or a judged quest, never demotes.
+
+### 3b. Evidence submission → verdict pipeline
+
+```text
+ phone: N photos + captured_at ISO
+        POST /api/evidence  (multipart)
+                │
+                ▼
+   ┌────────────────────────────┐  already   ┌─────────────────────┐
+   │ quest already has a verdict│───────────▶│ HTTP 409            │
+   └────────────┬───────────────┘            │ "already adjudicated"│
+                │ no                         └─────────────────────┘
+                ▼
+   ┌────────────────────────────┐  bad bytes ┌─────────────────────┐
+   │ images.compress_jpeg each  │───────────▶│ HTTP 422 (system    │
+   │ (≤1280px, ≤200KB, RGB)     │            │  voice: "indecipherable│
+   └────────────┬───────────────┘            │  evidence")         │
+                │ ok                         └─────────────────────┘
+                ▼
+   ┌────────────────────────────┐
+   │ save evidence/NNN.jpg      │
+   │ INSERT evidence rows       │
+   └────────────┬───────────────┘
+                ▼
+   ┌────────────────────────────┐
+   │ RULES TIER (authoritative) │  judge.rules_verdict()
+   │  count  ≥ target?          │  → {passed, reason}
+   │  captured_at ≥ issued_at?  │     insufficient | stale |
+   │  now ≤ deadline?           │     deadline | sincere | PASS
+   │  size ≥ 3000 bytes each?   │
+   └────────────┬───────────────┘
+                ▼
+   ┌────────────────────────────┐   mock / down / contradicts
+   │ MODEL TIER (narration only)│────────────────────────────┐
+   │  narrate(quest, meta, pass)│                            │
+   │  expects {"verdict","line"}│                            ▼
+   └────────────┬───────────────┘                 ┌──────────────────────┐
+                │ agrees                          │ CANNED_PASS /        │
+                ▼                                 │ CANNED_PENALTY bank  │
+   ┌────────────────────────────┐                 │ model_used="canned"  │
+   │ model line + model_used    │                 └──────────┬───────────┘
+   └────────────┬───────────────┘                            │
+                └──────────────────┬─────────────────────────┘
+                                   ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │ state.apply_pass(base_xp, day, perfect)  or apply_fail() │
+   │  +40–80, streak+1 (bonus +5/day cap +25, perfect +20)    │
+   │  or −30 XP, streak reset (XP floor 0)                    │
+   └────────────┬─────────────────────────────────────────────┘
+                ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │ save_state, INSERT verdicts (events_json, model_used)    │
+   │ return verdict payload → Verdict screen                  │
+   └──────────────────────────────────────────────────────────┘
+```
+
+Two invariants this pipeline must never violate:
+
+1. **Binary outcome comes only from the rules tier.** The model's `"verdict"` field is *checked against* the rules result, never *merged into* it. Contradiction ⇒ canned bank (Review Focus #2).
+2. **A quest is adjudicated at most once.** The 409 guard lives in the service, not the UI.
+
+---
+
+## 4. Tech stack & why
+
+| Layer | Choice | Why |
+|---|---|---|
+| Language | Python 3.13 | Already on the machine; one language for rules, state, server, and tests. |
+| API | FastAPI 0.40-era + uvicorn | Tiny surface (4 routes); serves JSON *and* the static frontend from one process; multipart upload is a one-liner. |
+| Storage | SQLite (`grass.db`) | Zero-ops, single file, WAL-unneeded at this scale; schema stays dump-able for the DEV post. |
+| Model runtime | Ollama (local) | `gemma3:4b` fits the RTX 2050 4GB; llama3.2/qwen2.5 as fallbacks; `keep_alive:-1` avoids reload stalls between quest and verdict calls. |
+| Model I/O | `format:"json"` chat | Deterministic parse target; we still wrap in try/except because JSON mode is a hint, not a guarantee. |
+| Images | Pillow 11 | Bounded re-encode (≤1280px, ≤200KB) so the rules tier sees honest file sizes and the DB stays small. |
+| Frontend | Vanilla HTML/CSS/JS | No build step under a 10-hour clock; phone only needs a browser; four screens is under the complexity threshold for a framework. |
+| Tests | pytest 9 + httpx TestClient | The state machine, rules tier, quest engine, and API are all testable with `GRASS_MOCK=1` — no live Ollama in CI. |
+| Demo | Video (allowed by rules) | No deploy target needed; LAN demo + screen recording is sufficient and honest. |
+
+**Deliberately rejected for v1:** anything requiring a second process, a build toolchain, image-classification models (VRAM + honesty), or push infra.
+
+---
+
+## 5. Module map & file responsibilities
+
+| File | Responsibility | Talks to |
+|---|---|---|
+| `app/state.py` | Pure XP/rank/streak transitions. No I/O, no time calls except injected `date`. | nothing (already shipped) |
+| `app/db.py` | Connection factory, schema DDL, `init_db`. Env override `GRASS_DB` for tests. | filesystem (SQLite) |
+| `app/quests.py` | 14-tuple template pool, least-used picking, daily issuance (idempotent), quest-side flavor line. | db, ollama_client |
+| `app/ollama_client.py` | The only Ollama touchpoint. `chat_json`, `reachable`, `mock_mode`, model fallback chain. | Ollama HTTP |
+| `app/judge.py` | `rules_verdict` (authoritative) + `narrate` (subordinate) + canned banks. | ollama_client |
+| `app/images.py` | `compress_jpeg` — Pillow normalize to bounded JPEG or `ValueError`. | Pillow |
+| `app/service.py` | Orchestration: load/save state, get-or-issue-today (incl. ignore check), submit_evidence (the pipeline in §3b), get_log. | all of the above |
+| `app/main.py` | FastAPI app, 4 routes, startup (`init_db`, `evidence/` mkdir), static mount. | service |
+| `static/index.html`, `style.css`, `app.js` | 4 screens, system-window aesthetic, fetch plumbing. | HTTP API |
+| `tests/*` | One test file per module; API-level flows in `test_api.py`; never touches live Ollama. | pytest |
+
+**Dependency direction (never inverted):** `main → service → {state, quests, judge, images, db} → ollama_client → Ollama`. `state` imports nothing from the project.
+
+---
+
+## 6. Data model (SQLite schema)
+
+```sql
+player      (id=1 PK, xp INT, rank_index INT, streak INT, last_pass_day TEXT)
+quests      (id PK, day TEXT UNIQUE, template_id, title, objective,
+             target_count INT, deadline_hour INT, xp_reward INT,
+             difficulty TEXT, issued_at TEXT, flavor TEXT)
+evidence    (id PK, quest_id FK, path TEXT, captured_at TEXT, uploaded_at TEXT)
+verdicts    (id PK, quest_id FK, passed INT, xp_delta INT,
+             rank_before TEXT, rank_after TEXT, streak_after INT,
+             line TEXT, flavor TEXT, model_used TEXT,
+             events_json TEXT, created_at TEXT)
+template_usage (template_id PK, times_used INT)
+```
+
+Reading notes:
+
+- `day` / dates are ISO strings (`YYYY-MM-DD`, or full ISO for timestamps) — string comparison is chronological, which keeps `ORDER BY` and "yesterday" logic trivial.
+- `model_used` records `"gemma3:4b"` / `"llama3.2"` / … or `"canned"` — this is what makes the "what is real" honesty section in the DEV post cheap to write.
+- `events_json` stores the `state.apply_*` event list so the Log screen can show rank-up lines without replaying transitions.
+
+---
+
+## 7. API contract
+
+| Route | Method | Input | Output | Errors |
+|---|---|---|---|---|
+| `/api/state` | GET | — | `{player:{xp,rank,streak}, quest:{…}\|null, verdict:{…}\|null, server_time}` | — |
+| `/api/evidence` | POST | multipart: `files[]`, `quest_id:int`, `captured_at:ISO` | verdict payload (see below) | 409 already adjudicated; 422 undecodable |
+| `/api/log` | GET | — | `{entries:[verdict rows newest-first, cap 50]}` | — |
+| `/api/health` | GET | — | `{ollama:bool, mock:bool, model:str}` | — |
+| `/` , `/static/*` | GET | — | frontend assets | 404 |
+
+Verdict payload shape (stable contract for `app.js`):
+
+```json
+{
+  "passed": true,
+  "line": "Evidence accepted. The System remains unimpressed.",
+  "model_used": "gemma3:4b",
+  "xp_delta": 45,
+  "rank_before": "F", "rank_after": "F",
+  "streak": 1,
+  "events": [{"kind": "XP_GAINED", "detail": "+45 XP"}],
+  "flavor": "Today's assignment reflects low but non-zero expectations."
+}
+```
+
+`GET /api/state` issues today's quest as a side effect (first call of the day runs the §3a lifecycle). This keeps the frontend at "one fetch per screen change".
+
+---
+
+## 8. Judging model — rules tier vs model tier
+
+The single most important design line in the project:
+
+| Tier | Decides | May influence | Failure mode |
+|---|---|---|---|
+| **Rules** (`judge.rules_verdict`) | PASS/FAIL + reason string | nothing — it is final | deterministic, fully unit-tested |
+| **Model** (`judge.narrate`) | nothing | the *wording* of the verdict line | down / slow / contradictory ⇒ canned bank |
+
+Rules checks, in evaluation order (first failure wins, reason string is user-visible in the System voice):
+
+1. `len(evidence) >= target_count` — "insufficient evidence"
+2. every `captured_at >= quest.issued_at` — "stale capture" (blocks screenshot-reuse and gallery-time-travel)
+3. `now.hour <= deadline_hour` — "deadline exceeded"
+4. every file ≥ 3000 bytes — "evidence too small to be sincere" (blocks 1×1 pixel and empty uploads)
+
+Model prompt contract: system = "You are THE SYSTEM: cold, bureaucratic outdoor quest authority. Dry humor. Never friendly, never obscene. Output JSON only." User = one-sentence request with expected shape `{"verdict":"PASS|PENALTY","line":string}` (≤30 words). Code compares `verdict` to the rules result; mismatch or parse failure ⇒ canned. This is Review Focus #2, and the contradiction test (`test_narrate_model_contradiction_is_discarded`) pins it.
+
+Why text-only (no image understanding) in v1: 4GB VRAM budget shared with the narrative model, no reliable free VLM that fits the honesty bar under deadline, and the challenge rewards *open innovation demonstrated*, not model maximalism. The DEV post says this out loud.
+
+---
+
+## 9. State machine contract (already shipped)
+
+`app/state.py` — pure functions, no I/O, injected `date`:
 
 ```python
-# tests/test_db.py
-import sqlite3
-
-from app import db
-
-
-def test_init_db_creates_tables_and_player(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
-    db.init_db()
-    with db.connect() as conn:
-        tables = {r["name"] for r in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"player", "quests", "evidence", "verdicts",
-                "template_usage"} <= tables
-        row = conn.execute("SELECT * FROM player WHERE id=1").fetchone()
-        assert row["xp"] == 0 and row["rank_index"] == 0
-
-
-def test_connect_returns_row_factory(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
-    db.init_db()
-    conn = db.connect()
-    row = conn.execute("SELECT 1 AS x").fetchone()
-    assert row["x"] == 1
+PlayerState(xp, rank_index, streak, last_pass_day)   # frozen dataclass; .rank -> str
+apply_pass(state, base_xp, day, perfect=False) -> (PlayerState, [Event])
+apply_fail(state) -> (PlayerState, [Event])
+apply_ignore(state) -> (PlayerState, [Event])
+Event(kind, detail)  # XP_GAINED | XP_LOST | RANK_UP | RANK_DOWN | STREAK_BROKEN
+RANKS = ("F","E","D","C","B","A","S")
+THRESHOLDS = (0, 100, 250, 500, 850, 1300, 2000)
 ```
 
-- [ ] **Step 2: Run to verify FAIL**
-
-Run: `python -m pytest tests/test_db.py -q`
-Expected: FAIL `ModuleNotFoundError: No module named 'app.db'`
-
-- [ ] **Step 3: Implement**
-
-```python
-# app/db.py
-"""SQLite storage. Single-player, local-only."""
-from __future__ import annotations
-
-import sqlite3
-from pathlib import Path
-
-DB_PATH = Path(__file__).resolve().parent.parent / "grass.db"
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS player (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    xp INTEGER NOT NULL DEFAULT 0,
-    rank_index INTEGER NOT NULL DEFAULT 0,
-    streak INTEGER NOT NULL DEFAULT 0,
-    last_pass_day TEXT
-);
-CREATE TABLE IF NOT EXISTS quests (
-    id INTEGER PRIMARY KEY,
-    day TEXT NOT NULL UNIQUE,
-    template_id TEXT NOT NULL,
-    title TEXT NOT NULL,
-    objective TEXT NOT NULL,
-    target_count INTEGER NOT NULL,
-    deadline_hour INTEGER NOT NULL,
-    xp_reward INTEGER NOT NULL,
-    difficulty TEXT NOT NULL,
-    issued_at TEXT NOT NULL,
-    flavor TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS evidence (
-    id INTEGER PRIMARY KEY,
-    quest_id INTEGER NOT NULL REFERENCES quests(id),
-    path TEXT NOT NULL,
-    captured_at TEXT NOT NULL,
-    uploaded_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS verdicts (
-    id INTEGER PRIMARY KEY,
-    quest_id INTEGER NOT NULL REFERENCES quests(id),
-    passed INTEGER NOT NULL,
-    xp_delta INTEGER NOT NULL,
-    rank_before TEXT NOT NULL,
-    rank_after TEXT NOT NULL,
-    streak_after INTEGER NOT NULL,
-    line TEXT NOT NULL,
-    flavor TEXT NOT NULL DEFAULT '',
-    model_used TEXT NOT NULL,
-    events_json TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS template_usage (
-    template_id TEXT PRIMARY KEY,
-    times_used INTEGER NOT NULL DEFAULT 0
-);
-"""
-
-
-def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db() -> None:
-    with connect() as conn:
-        conn.executescript(SCHEMA)
-        conn.execute("INSERT OR IGNORE INTO player (id) VALUES (1)")
-```
-
-- [ ] **Step 4: Verify PASS**
-
-Run: `python -m pytest tests/test_db.py -q`
-Expected: `2 passed`
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/db.py tests/test_db.py
-git commit -m "feat: sqlite schema and connection helpers"
-```
+Semantics pinned by 14 tests (all green): pass = +base XP, streak+1, perfect bonus, streak bonus +5/day capped at +25, rank-up events on threshold cross; fail = −30 with floor at 0 and streak reset; ignore = one rank step down (XP untouched — rank never falls from XP loss alone), streak reset; recovery via a later pass; same-day double-pass is a no-op.
 
 ---
 
-### Task 3: Ollama JSON client
+## 10. Frontend screens
 
-**Files:**
-- Create: `app/ollama_client.py`
-- Test: `tests/test_ollama.py`
+Four screens, one page, JS-toggled (no router):
 
-**Interfaces:**
-- Consumes: env `OLLAMA_URL` (default `http://127.0.0.1:11434`), `GRASS_MODEL` (default `gemma3:4b`), `GRASS_MOCK`.
-- Produces: `mock_mode() -> bool`; `chat_json(model:str, system:str, user:str, timeout:int=90) -> dict` (tries model then fallbacks, raises RuntimeError if all fail); `reachable() -> bool`; `DEFAULT_MODEL: str`; `CANDIDATE_MODELS: list[str]`.
+| Screen | Shown when | Shows |
+|---|---|---|
+| **Quest Window** | default | rank letter, XP bar toward next rank, streak, today's title/objective/target, flavor line, capture button |
+| **Evidence Capture** | after "capture" | `<input type=file capture=environment multiple>`, submit, "JUDGING…" in-flight state |
+| **Verdict Window** | after POST | PASS/PENALTY banner, narration line, XP delta, any RANK_UP events |
+| **Log** | after verdict / nav | timeline of past verdicts (title, pass/fail, line, model_used) |
 
-- [ ] **Step 1: Failing tests**
-
-```python
-# tests/test_ollama.py
-import pytest
-
-from app import ollama_client
-
-
-def test_mock_mode_env(monkeypatch):
-    monkeypatch.setenv("GRASS_MOCK", "1")
-    assert ollama_client.mock_mode() is True
-    monkeypatch.delenv("GRASS_MOCK")
-    assert ollama_client.mock_mode() is False
-
-
-def test_chat_json_falls_back_to_next_model(monkeypatch):
-    calls = []
-
-    class FakeResp:
-        def __init__(self, ok, payload=None):
-            self._ok, self._payload = ok, payload
-        def raise_for_status(self):
-            if not self._ok:
-                raise RuntimeError("boom")
-        def json(self):
-            return {"message": {"content": self._payload}}
-
-    def fake_post(url, json=None, timeout=None):
-        calls.append(json["model"])
-        if json["model"] == "gemma3:4b":
-            return FakeResp(False)
-        return FakeResp(True, '{"flavor": "ok"}')
-
-    monkeypatch.setattr(ollama_client.requests, "post", fake_post)
-    out = ollama_client.chat_json("gemma3:4b", "sys", "usr")
-    assert out == {"flavor": "ok"}
-    assert calls[0] == "gemma3:4b" and "llama3.2" in calls
-
-
-def test_chat_json_all_fail_raises(monkeypatch):
-    def fake_post(*a, **k):
-        raise RuntimeError("down")
-    monkeypatch.setattr(ollama_client.requests, "post", fake_post)
-    with pytest.raises(RuntimeError):
-        ollama_client.chat_json("gemma3:4b", "s", "u")
-
-
-def test_reachable_false_when_down(monkeypatch):
-    def fake_get(*a, **k):
-        raise RuntimeError("nope")
-    monkeypatch.setattr(ollama_client.requests, "get", fake_get)
-    assert ollama_client.reachable() is False
-```
-
-- [ ] **Step 2: Verify FAIL**
-
-Run: `python -m pytest tests/test_ollama.py -q`
-Expected: FAIL import
-
-- [ ] **Step 3: Implement**
-
-```python
-# app/ollama_client.py
-"""Minimal Ollama JSON-chat client. GRASS_MOCK=1 never reaches the network."""
-from __future__ import annotations
-
-import json
-import os
-
-import requests
-
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-DEFAULT_MODEL = os.environ.get("GRASS_MODEL", "gemma3:4b")
-CANDIDATE_MODELS = [DEFAULT_MODEL, "llama3.2", "qwen2.5:7b"]
-
-
-def mock_mode() -> bool:
-    return os.environ.get("GRASS_MOCK") == "1"
-
-
-def chat_json(model: str, system: str, user: str, timeout: int = 90) -> dict:
-    """One JSON object. Tries candidate models in order; raises if all fail."""
-    errors = []
-    chain = [model] + [c for c in CANDIDATE_MODELS if c != model]
-    for m in chain:
-        try:
-            r = requests.post(
-                OLLAMA_URL + "/api/chat",
-                json={
-                    "model": m,
-                    "stream": False,
-                    "keep_alive": -1,
-                    "options": {"temperature": 0.75},
-                    "format": "json",
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                },
-                timeout=timeout,
-            )
-            r.raise_for_status()
-            return json.loads(r.json()["message"]["content"])
-        except Exception as e:  # noqa: BLE001
-            errors.append(m + ": " + str(e)[:120])
-    raise RuntimeError("all models failed: " + " | ".join(errors))
-
-
-def reachable() -> bool:
-    try:
-        requests.get(OLLAMA_URL + "/api/tags", timeout=2)
-        return True
-    except Exception:
-        return False
-```
-
-- [ ] **Step 4: Verify PASS** -> `python -m pytest tests/test_ollama.py -q` -> `4 passed`
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/ollama_client.py tests/test_ollama.py
-git commit -m "feat: ollama json chat client with model fallback"
-```
+Aesthetic (locked): terminal black `#05060a`, amber `#ffb000` primary, green `#39ff14` accent, 1px bordered "windows", monospace. Poll `/api/state` on load and after actions only — no timers. On 409, show the existing verdict instead of an error (the game already judged you).
 
 ---
 
-### Task 4: Quest engine (templates + issuance)
+## 11. Design decisions (locked vs open)
 
-**Files:**
-- Create: `app/quests.py`
-- Test: `tests/test_quests.py`
+**Locked (do not relitigate during build):**
 
-**Interfaces:**
-- Consumes: `db.connect`, `ollama_client.chat_json`, `ollama_client.mock_mode`.
-- Produces: `TEMPLATES: list[tuple]` (7-tuples: id, difficulty, xp, target_count, deadline_hour, title, objective); `CANNED_FLAVOR: list[str]`; `pick_template(conn) -> tuple` (least-used bias); `gemma_flavor(title, objective) -> tuple[str,str]` (line, model_used; canned on any failure); `issue_quest_for_day(conn, day:str) -> dict|None` (idempotent per day).
+- Rules tier authoritative; model narrates only (§8).
+- `GRASS_MOCK=1` forces canned narration — required for tests, available for demos.
+- Model chain: `GRASS_MODEL` (default `gemma3:4b`) → `llama3.2` → `qwen2.5:7b`; `keep_alive:-1`.
+- Ranks/XP/streak constants exactly as §9.
+- Roasts are a feature **not advertised** — README/DEV post pitch the loop and the local/offline story, not the meanness.
+- No Solo Leveling IP anywhere; README keeps a disclaimer line only.
+- Demo = video; no deploy.
+- Privacy: nothing about the user's personal circumstances appears in repo, docs, or post.
 
-- [ ] **Step 1: Failing tests**
+**Open (decide only if forced by implementation):**
 
-```python
-# tests/test_quests.py
-from app import db, quests
-
-
-def setup(tmp_path, monkeypatch):
-    monkeypatch.setattr(db, "DB_PATH", tmp_path / "t.db")
-    db.init_db()
-    return db.connect()
-
-
-def test_issue_is_idempotent_per_day(tmp_path, monkeypatch):
-    conn = setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("GRASS_MOCK", "1")
-    q1 = quests.issue_quest_for_day(conn, "2026-10-11")
-    q2 = quests.issue_quest_for_day(conn, "2026-10-11")
-    assert q1["id"] == q2["id"]
-    n = conn.execute("SELECT COUNT(*) c FROM quests").fetchone()["c"]
-    assert n == 1
-
-
-def test_anti_repeat_prefers_unused(tmp_path, monkeypatch):
-    conn = setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("GRASS_MOCK", "1")
-    seen = []
-    for i in range(len(quests.TEMPLATES)):
-        q = quests.issue_quest_for_day(conn, f"2026-11-{i+1:02d}")
-        seen.append(q["template_id"])
-    assert len(set(seen)) == len(quests.TEMPLATES)  # all 14 distinct first pass
-
-
-def test_canned_flavor_in_mock(tmp_path, monkeypatch):
-    conn = setup(tmp_path, monkeypatch)
-    monkeypatch.setenv("GRASS_MOCK", "1")
-    q = quests.issue_quest_for_day(conn, "2026-10-11")
-    assert q["flavor"] in quests.CANNED_FLAVOR
-```
-
-- [ ] **Step 2: Verify FAIL** -> `python -m pytest tests/test_quests.py -q` -> import error
-- [ ] **Step 3: Implement** `app/quests.py` with the 14-template pool below (verbatim from this plan's design), `pick_template`, `gemma_flavor` (mock_mode -> canned; else chat_json with system "You are THE SYSTEM: cold, bureaucratic outdoor quest authority. Dry humor. Never friendly, never obscene. Output JSON only." and user asking for one sentence <=20 words as JSON {"flavor": string}; any exception -> canned), `issue_quest_for_day` (existing-day SELECT first; insert + template_usage upsert + commit).
-
-Templates (verbatim):
-
-```python
-TEMPLATES = [
-    ("living",   "D", 40, 3, 20, "LIVING THINGS",
-     "Find 3 living things outdoors. Photograph each. Humans do not count."),
-    ("sky",      "D", 40, 1, 18, "SKY CHECK",
-     "Photograph the sky from outside. Windows are not outside."),
-    ("textures", "D", 40, 2, 20, "TEXTURES",
-     "Photograph 2 outdoor surfaces you have never touched. Touch them first."),
-    ("lane",     "C", 55, 1, 19, "END OF THE LANE",
-     "Walk to the end of your street. Photograph something you never noticed."),
-    ("colors",   "C", 55, 3, 20, "COLOR HUNT",
-     "Photograph 3 different colors found outdoors. No screens. No printed ink."),
-    ("ground",   "C", 55, 1, 20, "GROUND LEVEL",
-     "Photograph something at ground level, from outside. Crouch. The System waits."),
-    ("shadows",  "C", 60, 2, 21, "SHADOWS",
-     "Photograph 2 shadows. They only exist outside."),
-    ("furthest", "B", 70, 1, 20, "FURTHEST POINT",
-     "Go to the farthest point you can reach from your door. Photograph what you see."),
-    ("small",    "B", 70, 3, 21, "SMALL WORLDS",
-     "Photograph 3 small things: a pebble, a leaf, a crack. Detail is a skill."),
-    ("altered",  "B", 60, 2, 20, "ALTERED BY TIME",
-     "Photograph 2 things changed by weather or time: rust, cracks, wilt, bloom."),
-    ("night",    "D", 45, 1, 22, "NIGHT AIR",
-     "After dark, step outside. Photograph one thing lit by moon or streetlight."),
-    ("doorstep", "D", 40, 1, 20, "DOORSTEP",
-     "Stand outside your own door. Photograph your home from the outside."),
-    ("water",    "C", 55, 1, 20, "WATER",
-     "Find water that did not come from a tap. Photograph it."),
-    ("still",    "B", 65, 1, 21, "STILLNESS",
-     "Stand outside for 60 seconds without recording anything. Then photograph the spot."),
-]
-
-CANNED_FLAVOR = [
-    "The System has observed your inactivity with growing interest.",
-    "A quest has been allocated to you. Gratitude is optional; compliance is not.",
-    "Today's assignment reflects the System's low but non-zero expectations.",
-    "You have been selected for outdoor activity. This is not an honor.",
-    "The System noticed you are indoors again. How predictable.",
-    "Consider this quest a loan. Repayment is measured in evidence.",
-    "Your rank reflects recent enthusiasm. Adjust accordingly.",
-    "The System planned this around your habits. It has studied them.",
-]
-```
-
-NOTE: template tuple order in TEMPLATES is `(id, difficulty, xp, target_count, deadline_hour, title, objective)`; `pick_template` bias: count usage from `template_usage`, choose among minimum-usage pool at random.
-NOTE: `gemma_flavor` must catch ALL exceptions and fall back to canned (Task 5 Review Focus #1's quest-side twin).
-
-- [ ] **Step 4: Verify PASS** -> `python -m pytest tests/test_quests.py -q` -> `3 passed`
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/quests.py tests/test_quests.py
-git commit -m "feat: quest templates, anti-repeat issuance, flavor fallback"
-```
+- Whether `/api/evidence` applies one `captured_at` to all files (current plan) or per-file (defer unless trivial).
+- Exact canned-bank line wording (voice-checked at demo time).
+- Video length and whether field footage or phone-screen-record only.
 
 ---
 
-### Task 5: Judge (rules authoritative + narration)
+## 12. Build tasks (TDD order)
 
-**Files:**
-- Create: `app/judge.py`
-- Test: `tests/test_judge.py`
+Each task: failing test → minimal implementation → green → commit (exact-path `git add`). Task 1 is verification-only.
 
-**Interfaces:**
-- Consumes: `ollama_client.chat_json/mock_mode`, canned banks (local).
-- Produces:
-  - `CANNED_PASS: list[str]`, `CANNED_PENALTY: list[str]`
-  - `rules_verdict(evidence_meta:list[dict], target_count:int, issued_at:str, deadline_hour:int, now:datetime|None=None) -> dict` -> `{"passed": bool, "reason": str}` where meta dicts are `{"captured_at": isostr, "size": int}`; fails if `len(meta) < target_count` ("insufficient evidence"); fails if ANY captured_at < issued_at ("stale capture"); fails if now hour > deadline_hour ("deadline exceeded"); fails if any size < 3000 bytes ("evidence too small to be sincere").
-  - `narrate(quest:dict, meta:list[dict], passed:bool) -> tuple[str,str]` -> `(line, model_used)`; prompt asks for JSON `{"verdict":"PASS|PENALTY","line":string}` (<=30 words, system voice); if mock_mode, model failure, OR model verdict != rules verdict -> canned bank line and model_used="canned" (Review Focus #2).
+### Task 1 — State machine (SHIPPED)
+Verify: `python -m pytest tests/test_state.py -q` → `14 passed`. Commit only if uncommitted.
 
-- [ ] **Step 1: Failing tests**
+### Task 2 — Database layer
+Create `app/db.py` (`connect`, `init_db`, `SCHEMA` §6, `DB_PATH` with `GRASS_DB` env override) + `tests/test_db.py` (tables created, player row seeded, Row factory works).
 
-```python
-# tests/test_judge.py
-from datetime import datetime
+### Task 3 — Ollama client
+Create `app/ollama_client.py` (`mock_mode`, `chat_json` with fallback chain and `RuntimeError` on total failure, `reachable`) + `tests/test_ollama.py` (mock env parsing, fallback order via monkeypatched `requests.post`, all-fail raises, reachable-false).
 
-from app import judge
+### Task 4 — Quest engine
+Create `app/quests.py`: the 14-template pool (ids: living, sky, textures, lane, colors, ground, shadows, furthest, small, altered, night, doorstep, water, still — each with difficulty/xp/target_count/deadline_hour/title/objective), `CANNED_FLAVOR` bank, `pick_template` (least-used bias), `gemma_flavor` (any failure ⇒ canned), `issue_quest_for_day` (idempotent). Tests: same-day idempotent, first pass over 14 days hits all 14 ids distinct, mock flavor ∈ canned bank.
 
+### Task 5 — Judge
+Create `app/judge.py`: `rules_verdict` (§8 order), `CANNED_PASS`/`CANNED_PENALTY`, `narrate` with contradiction-discard. Tests: happy PASS, insufficient, stale, deadline, tiny file, mock canned, model contradiction discarded.
 
-META_OK = [
-    {"captured_at": "2026-10-11T10:00:00", "size": 50_000},
-    {"captured_at": "2026-10-11T10:01:00", "size": 60_000},
-    {"captured_at": "2026-10-11T10:02:00", "size": 55_000},
-]
+### Task 6 — Image compression
+Create `app/images.py` (`compress_jpeg`) + tests (downscale ≤1280 and ≤200KB; garbage bytes ⇒ `ValueError`).
 
+### Task 7 — Game service
+Create `app/service.py`: `load_state`/`save_state`, `get_or_issue_today` (§3a incl. ignore check), `submit_evidence` (§3b, 409 via `ServiceError`), `get_log`. Tests: pass flow, fail flow, double-submit raises, yesterday-ignored demotes, yesterday-passed does not, no-yesterday-record does not.
 
-def test_rules_pass_happy_path():
-    out = judge.rules_verdict(META_OK, 3, "2026-11-01T09:00:00", 20,
-                              now=datetime(2026, 11, 1, 10, 30))
-    assert out["passed"] is True
+### Task 8 — FastAPI app
+Create `app/main.py` (routes §7, startup, static) + `tests/test_api.py` (httpx TestClient; `pip install httpx` in this task). Full suite must be green at task end.
 
+### Task 9 — Frontend
+Create `static/index.html`, `style.css`, `app.js` (§10). Manual E2E with `GRASS_MOCK=1` on desktop + phone.
 
-def test_rules_fail_too_few():
-    out = judge.rules_verdict(META_OK[:1], 3, "2026-11-01T09:00:00", 20,
-                              now=datetime(2026, 11, 1, 10, 30))
-    assert out["passed"] is False and "insufficient" in out["reason"]
-
-
-def test_rules_fail_stale_capture():
-    out = judge.rules_verdict(META_OK, 3, "2026-11-01T12:00:00", 20,
-                              now=datetime(2026, 11, 1, 13, 0))
-    assert out["passed"] is False and "stale" in out["reason"]
-
-
-def test_rules_fail_after_deadline():
-    out = judge.rules_verdict(META_OK, 3, "2026-11-01T09:00:00", 10,
-                              now=datetime(2026, 11, 1, 11, 0))
-    assert out["passed"] is False and "deadline" in out["reason"]
-
-
-def test_rules_fail_tiny_file():
-    meta = [dict(m, size=10) for m in META_OK]
-    out = judge.rules_verdict(meta, 3, "2026-11-01T09:00:00", 20,
-                              now=datetime(2026, 11, 1, 10, 0))
-    assert out["passed"] is False and "sincere" in out["reason"]
-
-
-def test_narrate_mock_canned(monkeypatch):
-    monkeypatch.setenv("GRASS_MOCK", "1")
-    line, used = judge.narrate({"title": "T"}, META_OK, True)
-    assert used == "canned" and line in judge.CANNED_PASS
-
-
-def test_narrate_model_contradiction_is_discarded(monkeypatch):
-    monkeypatch.delenv("GRASS_MOCK", raising=False)
-    monkeypatch.setattr(judge, "chat_json",
-                        lambda *a, **k: {"verdict": "PENALTY", "line": "no"})
-    monkeypatch.setattr("app.ollama_client.mock_mode", lambda: False)
-    line, used = judge.narrate({"title": "T"}, META_OK, True)
-    assert used == "canned" and line in judge.CANNED_PASS
-```
-
-- [ ] **Step 2: Verify FAIL** -> import error
-- [ ] **Step 3: Implement** `app/judge.py` (banks + rules_verdict + narrate; narrate imports chat_json and mock_mode from app.ollama_client; contradiction or exception -> canned).
-- [ ] **Step 4: Verify PASS** -> `python -m pytest tests/test_judge.py -q` -> `7 passed`
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/judge.py tests/test_judge.py
-git commit -m "feat: rules-authoritative judge with narrated verdicts"
-```
+### Task 10 — E2E, demo video, DEV post, submission
+Full suite count recorded; one real-Ollama smoke (flavor + narrated verdict, note latency); demo video ≤3 min; `docs/demo-script.md`; DEV post draft (challenge template, `#hf26challenge`, claim+number title, "why open matters", "what is real / what is not", Gemma category mapping, AI-assistance disclosure); human submits by **11:30 IST**.
 
 ---
 
-### Task 6: Image compression helper
+## 13. Global constraints
 
-**Files:**
-- Create: `app/images.py`
-- Test: `tests/test_images.py`
-
-**Interfaces:**
-- Consumes: Pillow.
-- Produces: `compress_jpeg(data: bytes, max_side: int = 1280, target_kb: int = 200) -> bytes` (RGB convert, downscale, iterative quality 80->40 until <= target_kb); raises `ValueError` on undecodable bytes.
-
-- [ ] **Step 1: Failing test**
-
-```python
-# tests/test_images.py
-import io
-
-import pytest
-from PIL import Image
-
-from app import images
-
-
-def make_png(size=(2000, 1500), color=(10, 200, 30)):
-    buf = io.BytesIO()
-    Image.new("RGB", size, color).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-def test_compress_downscales_and_shrinks():
-    out = images.compress_jpeg(make_png())
-    img = Image.open(io.BytesIO(out))
-    assert max(img.size) <= 1280
-    assert len(out) <= 200 * 1024
-
-
-def test_compress_rejects_garbage():
-    with pytest.raises(ValueError):
-        images.compress_jpeg(b"not an image at all")
-```
-
-- [ ] **Step 2: Verify FAIL** -> import error
-- [ ] **Step 3: Implement**
-
-```python
-# app/images.py
-"""Server-side evidence normalization: JPEG, bounded size."""
-from __future__ import annotations
-
-import io
-
-from PIL import Image
-
-
-def compress_jpeg(data: bytes, max_side: int = 1280, target_kb: int = 200) -> bytes:
-    try:
-        img = Image.open(io.BytesIO(data))
-        img.load()
-    except Exception as e:
-        raise ValueError("undecodable image") from e
-    img = img.convert("RGB")
-    img.thumbnail((max_side, max_side))
-    quality = 80
-    while quality >= 40:
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=quality)
-        if buf.tell() <= target_kb * 1024:
-            return buf.getvalue()
-        quality -= 10
-    return buf.getvalue()
-```
-
-- [ ] **Step 4: Verify PASS** -> `2 passed`
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/images.py tests/test_images.py
-git commit -m "feat: evidence image compression helper"
-```
+- No cloud, accounts, API keys, push notifications. LAN only.
+- `GRASS_MOCK=1` ⇒ canned everywhere; tests never require live Ollama.
+- Rules decide PASS/FAIL; model narration is subordinate (§8).
+- Photos: JPEG, client ≤200KB target, server ≤1280px / ≤200KB.
+- Ranks F..S at 0/100/250/500/850/1300/2000; fail −30 XP; streak bonus +5/day cap +25; perfect +20.
+- No IP-lookalike naming; no personal-health framing anywhere.
+- Commit after every task; exact-path adds; no force-push.
+- Hard deadline: demo video by **~10:30 IST**, submission by **11:30 IST** (before 12:29 IST cut-off).
 
 ---
 
-### Task 7: Game service (glue + daily ignore check)
+## 14. Review focus — failure modes that must be pinned
 
-**Files:**
-- Create: `app/service.py`
-- Test: `tests/test_service.py`
-
-**Interfaces:**
-- Consumes: `db`, `state`, `quests`, `judge`, `images`.
-- Produces (exact signatures):
-  - `load_state(conn) -> state.PlayerState` (from player row; last_pass_day parsed from ISO date or None)
-  - `save_state(conn, st) -> None`
-  - `get_or_issue_today(conn, day:str) -> dict` (runs missed-yesterday check BEFORE issuing: if a quest exists for yesterday, no verdict exists for it, AND today has no quest yet -> apply_ignore + record synthetic verdict row line="No evidence. The System noted this.")
-  - `submit_evidence(conn, quest_id:int, files:list[bytes], captured_ats:list[str]) -> dict` -> verdict payload `{"passed":bool,"line":str,"model_used":str,"xp_delta":int,"rank_before":str,"rank_after":str,"streak":int,"events":[{"kind","detail"}],"flavor":str}`; rejects (raises `ServiceError(msg)`) if quest already has a verdict; compresses each file to `evidence/NNN.jpg`; stores meta; rules_verdict; narrate; apply_pass/apply_fail; insert verdicts row.
-  - `class ServiceError(Exception)`
-- Produces (API layer uses): `get_log(conn) -> list[dict]` (verdicts joined with quest titles, newest first, cap 50).
-
-- [ ] **Step 1: Failing tests** (tmp DB via monkeypatch; GRASS_MOCK=1; captured_ats after issued_at; size real compressed jpeg from Task 6 helper)
-
-Cover: pass flow (3 photos -> xp increases, verdict row written); fail flow (1 photo -> -30 or 0 floor, streak reset); double-submit raises ServiceError; yesterday-ignored demotes; yesterday-passed does NOT demote; no-yesterday-record does NOT demote. (Write these as 6 tests in `tests/test_service.py` using helpers `setup()` like Task 4.)
-
-- [ ] **Step 2: Verify FAIL** -> import error
-- [ ] **Step 3: Implement** `app/service.py` per interfaces. Ignore-check: look up quest for `(today - 1 day)`; if found and no verdict for it -> apply_ignore, insert verdicts row (passed=0, xp_delta=0, model_used="rules").
-- [ ] **Step 4: Verify PASS** -> `python -m pytest tests/test_service.py -q` -> `6 passed`
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/service.py tests/test_service.py
-git commit -m "feat: game service - submission, verdicts, missed-quest demotion"
-```
+| # | Failure mode | Expected behavior | Pinned by |
+|---|---|---|---|
+| 1 | Ollama down or times out mid-verdict | Canned PASS/FAIL still returned; game continues | Task 3 fallback tests + Task 5 mock/narrate tests + Task 7 happy paths under `GRASS_MOCK` |
+| 2 | Model contradicts rules verdict | Rules verdict wins; line swapped to canned | `test_narrate_model_contradiction_is_discarded` (Task 5) |
+| 3 | Same-day re-open double-issues or re-adjudicates | Quest idempotent per day; second submit → 409 | `test_issue_is_idempotent_per_day` (Task 4) + double-submit test (Task 7) |
+| 4 | Missed-yesterday demotion mis-fires | Demote only if yesterday's quest exists *and* was never judged | 3 demotion tests (Task 7) |
+| 5 | Hostile uploads (garbage bytes, tiny files, gallery-old timestamps) | 4xx with System-voice message; never a 500 | Task 6 garbage test, Task 5 tiny/stale rules tests, Task 8 422 test |
 
 ---
 
-### Task 8: FastAPI app + routes
+## 15. Gotchas (host-specific)
 
-**Files:**
-- Create: `app/main.py`
-- Test: `tests/test_api.py`
-- Create runtime dirs at startup: `evidence/` (mkdir exist_ok).
-
-**Interfaces:**
-- Consumes: everything above.
-- Produces routes:
-  - `GET /api/state` -> `{"player":{xp,rank,streak},"quest":{...}|null,"verdict":{...}|null,"server_time":iso}` (issues today's quest on first call)
-  - `POST /api/evidence` multipart: `files` (list), `quest_id` (int), `captured_at` (single ISO applied to all, v1) -> verdict payload; ServiceError -> 409; ValueError -> 422
-  - `GET /api/log` -> `{"entries":[...]}`
-  - `GET /api/health` -> `{"ollama": bool, "mock": bool, "model": str}`
-  - `GET /` -> `static/index.html`; `/static/*` StaticFiles
-- `init_db()` + `Path("evidence").mkdir(exist_ok=True)` in FastAPI startup event.
-
-- [ ] **Step 1: Failing tests** (`httpx` must be installed: `pip install httpx` as part of this task). TestClient flows: health ok; state issues quest once; POST evidence with tiny valid JPEG (PIL-generated) returns verdict JSON with passed true when meta count matches; second POST same quest -> 409; log returns list.
-- [ ] **Step 2: Verify FAIL**
-- [ ] **Step 3: Implement** `app/main.py` (FastAPI, File uploads `list[UploadFile]`, monkeypatched db path in tests via env `GRASS_DB` -> if set, db.DB_PATH points there; set this env in tests).
-  NOTE: add env override in `app/db.py`: `DB_PATH = Path(os.environ.get("GRASS_DB", default))` (small Modify step; update Task 2 test accordingly if needed).
-- [ ] **Step 4: Verify PASS** -> `python -m pytest -q` -> ALL green (all tasks)
-- [ ] **Step 5: Commit**
-
-```bash
-git add app/main.py tests/test_api.py app/db.py
-git commit -m "feat: fastapi routes and static serving"
-```
+- **PowerShell 5.1 host:** no `&&`; no inline comments in `.gitignore`; PS `.Replace(a,b,n)` 3-arg overload does **not** exist; a triple-backtick inside a double-quoted PS string breaks parsing; console cp1252 mangles unicode — write UTF-8 files via `[System.IO.File]::WriteAllText($p,$s,(New-Object System.Text.UTF8Encoding($false)))`.
+- **bash tool = WSL** (`/mnt/c/...` paths); workdir is the Windows project dir.
+- **VRAM:** `gemma3:4b` + desktop compositing on a 4GB RTX 2050 is tight — `keep_alive:-1` is set so we pay load cost once; if the pull is still running at build time, tests stay green because they are mock-mode.
+- **Multipart on FastAPI** needs `python-multipart` (already installed, 0.0.22).
+- **TestClient** needs `httpx` — install inside Task 8, not earlier.
+- **SQLite + uvicorn reloader:** single-worker default; do not enable `--reload` while a demo DB is live.
 
 ---
 
-### Task 9: Frontend (4 screens, mobile-first)
+## 16. Milestones & deadline plan
 
-**Files:**
-- Create: `static/index.html`, `static/style.css`, `static/app.js`
-
-**Interfaces:**
-- Consumes: `/api/state`, `/api/evidence`, `/api/log`, `/api/health`.
-- Produces: UI screens (single page, JS-toggled): Quest Window (rank/XP/streak bar + today's quest + flavor + capture button + status line); Evidence Capture (file input `capture="environment"` multiple + submit); Verdict Window (PASS/PENALTY banner + narration line + XP delta + rank-up events); Log (timeline of past verdicts). System-window aesthetic: black bg (#05060a), amber #ffb000 primary text, green #39ff14 accents, 1px bordered "windows", monospace. No frameworks. Poll `/api/state` on load + after actions only (no timers).
-
-- [ ] Step 1: Implement the three files (vanilla JS; show "JUDGING..." state while POST in flight; on 409 show existing verdict).
-- [ ] Step 2: Manual check: `uvicorn app.main:app --host 0.0.0.0 --port 8000` with `GRASS_MOCK=1`, open on desktop + phone on same Wi-Fi, run one full loop.
-- [ ] Step 3: Commit.
-
-```bash
-git add static/index.html static/style.css static/app.js
-git commit -m "feat: mobile-first system-window frontend"
-```
+| Milestone | Contents | Gate |
+|---|---|---|
+| M1 (done) | Design freeze + state machine + plan reference | 14 state tests green |
+| M2 | Tasks 2–6 (backend core) | per-task suites green |
+| M3 | Tasks 7–8 (service + API) | **full suite green** |
+| M4 | Task 9 (frontend) | manual E2E loop on phone |
+| M5 | Task 10 (video, post, submit) | submission receipt before 11:30 IST |
 
 ---
 
-### Task 10: E2E hardening, demo video, DEV post, submission
-
-**Files:**
-- Modify: `README.md` (screenshots section + exact run steps), `docs/design.md` (tick shipped list if any drift)
-- Create: `docs/demo-script.md` (numbered on-screen steps used for the video)
-- Create: DEV post draft (local file `docs/devpost-draft.md`; final submission via dev.to UI by the human)
-
-**Steps:**
-- [ ] 1. Run FULL suite: `python -m pytest -q` -> all green. Record count.
-- [ ] 2. Real-Ollama smoke (no mock): start server, one quest flavor + one verdict narrated by gemma3:4b (or fallback); note latency in demo notes.
-- [ ] 3. Record demo video (OBS or phone screen-record): boot server -> quest window -> outdoor capture (field shot) -> submit -> verdict -> rank/XP. Keep <=3 min.
-- [ ] 4. Write `docs/demo-script.md` matching the video.
-- [ ] 5. DEV post draft using challenge template + `#hf26challenge`; claim+number title candidates; sections: The System (what), Demo (video embed), Why open innovation matters, How I built it (real bugs: model contradiction handling, 4GB VRAM constraints, canned fallback), What is real and what is not (no pixel understanding v1; LAN-only demo), Prize categories (Best Use of Gemma), AI assistance disclosure line. NO roast-centric marketing.
-- [ ] 6. Human: review post, upload video to DEV, submit before 12:29 IST. Push final commits.
-
-```bash
-git add -A docs README.md
-git commit -m "docs: demo script, dev post draft, readme polish"
-git push origin main
-```
-
----
-
-## Self-review notes (skill step, run at plan time)
-
-1. Spec coverage: design.md sections 2-8 all mapped to Tasks 1-9; section 9 (submission) = Task 10. Cuts (roadmap) intentionally unimplemented.
-2. Placeholders: Task 7/8 test bodies are described structurally but every assertion set is named; service/api implementers have exact signatures. Acceptable under sprint, but executor must write those tests explicitly per the named cases.
-3. Type consistency: `PlayerState`/`Event` names consistent Tasks 1->7->8; `rules_verdict` kwargs consistent 5->7.
-4. Review Focus: each of the 5 lines has an owning task + named tests (1: quests/ollama canned tests + service; 2: test_narrate_model_contradiction_is_discarded; 3: test_issue_is_idempotent_per_day + double-submit test; 4: three demotion tests; 5: rules tiny/stale + compress garbage + api 422).
+*Self-review performed at write time: spec sections map to Tasks 1–10; §14 failure modes each have an owning task and named test; signatures in §5–§7 match across modules (`PlayerState`/`apply_*`, `rules_verdict`, `narrate`, `ServiceError`, `compress_jpeg`, `chat_json`); no TBD/placeholder bodies — Tasks 7–8 tests are specified by named assertion cases with the §3b pipeline as the contract.*
