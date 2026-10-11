@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SYSTEM://GRASS</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">SYSTEM://GRASS</div>
+  <div id="pending-badge" class="pending-badge" hidden></div>
+</header>
+
+<nav class="tabs">
+  <button type="button" class="tab active" data-screen="quest">QUEST</button>
+  <button type="button" class="tab" data-screen="evidence">EVIDENCE</button>
+  <button type="button" class="tab" data-screen="log">LOG</button>
+</nav>
+
+<main id="main">
+
+  <section id="screen-quest" class="screen window">
+    <div class="win-title">&gt; TODAY'S ASSIGNMENT</div>
+    <div class="player-row">
+      <div class="stat-box">
+        <span class="stat-label">RANK</span>
+        <span id="rank" class="rank">-</span>
+      </div>
+      <div class="stat-box xp-box">
+        <span class="xp-meta"><span id="xp-label">0 XP</span><span id="xp-next">NEXT 100</span></span>
+        <span class="xp-track"><span id="xp-fill" class="xp-fill"></span></span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-label">STREAK</span>
+        <span id="streak" class="streak">0</span>
+      </div>
+    </div>
+    <div id="quest-pending-chip" class="chip" hidden></div>
+    <div id="quest-title" class="quest-title">ACQUIRING...</div>
+    <div id="quest-objective" class="quest-objective"></div>
+    <div id="quest-target" class="quest-target"></div>
+    <div id="quest-flavor" class="quest-flavor"></div>
+    <button id="capture-btn" class="btn primary" type="button">CAPTURE</button>
+    <div class="status-line" id="quest-status" hidden></div>
+  </section>
+
+  <section id="screen-evidence" class="screen window" hidden>
+    <div class="win-title">&gt; EVIDENCE CAPTURE</div>
+    <label class="file-label" for="file-input">SHOOT / SELECT PHOTOS</label>
+    <input id="file-input" type="file" capture="environment" multiple accept="image/*">
+    <div id="judging" class="judging" hidden>JUDGING.</div>
+    <div class="buffer-head">
+      <span id="buffer-count" class="buffer-count">0 IN BUFFER</span>
+      <button id="submit-pending" class="btn primary" type="button">SUBMIT PENDING</button>
+    </div>
+    <div id="buffer-list" class="buffer-list"></div>
+    <div class="hint">PHOTOS STAY ON THIS DEVICE UNTIL THE SYSTEM ACCEPTS THEM.</div>
+  </section>
+
+  <section id="screen-verdict" class="screen window" hidden>
+    <div class="win-title">&gt; VERDICT</div>
+    <div id="verdict-note" class="verdict-note" hidden></div>
+    <div id="verdict-banner" class="banner">---</div>
+    <div id="verdict-line" class="verdict-line"></div>
+    <div id="verdict-xp" class="verdict-xp"></div>
+    <ul id="verdict-events" class="events"></ul>
+    <div class="btn-row">
+      <button id="verdict-return" class="btn" type="button">RETURN TO QUEST</button>
+      <button id="verdict-log" class="btn" type="button">OPEN LOG</button>
+    </div>
+  </section>
+
+  <section id="screen-log" class="screen window" hidden>
+    <div class="win-title">&gt; SYSTEM LOG</div>
+    <div id="log-list" class="log-list"></div>
+    <div class="btn-row">
+      <button id="log-return" class="btn" type="button">RETURN TO QUEST</button>
+    </div>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
