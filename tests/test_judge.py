@@ -166,3 +166,38 @@ def test_vision_enabled_env_matrix(monkeypatch, env, expected):
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     assert judge.vision_enabled() is expected
+
+
+def test_gate_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "off")
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.01]))
+    assert passed is True
+    assert reason == "accepted"
+
+
+def test_gate_skipped_in_mock_mode(monkeypatch):
+    monkeypatch.setenv("GRASS_MOCK", "1")
+    monkeypatch.setenv("GRASS_VISION", "on")
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.01]))
+    assert passed is True
+    assert reason == "accepted"
+
+
+def test_gate_swallows_scorer_exception(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+
+    def boom(quest_text, images):
+        raise RuntimeError("cuda exploded")
+
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], boom)
+    assert passed is True
+    assert reason == "accepted"
+
+
+def test_gate_passes_when_no_images(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [], _mk_scorer([]))
+    assert passed is True
+    assert reason == "accepted"
