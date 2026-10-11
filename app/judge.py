@@ -75,11 +75,11 @@ def vision_gate(quest: dict, image_bytes: list[bytes], scorer) -> tuple[bool, st
     threshold = _vision_threshold()
     try:
         scores = scorer(text, image_bytes)
+        if any(s < threshold for s in scores):
+            return (False, "wrong photo")
     except Exception as exc:  # noqa: BLE001 - gate must never raise
         log.warning("vision scoring failed, skipping gate: %s", exc)
         return (True, "accepted")
-    if any(s < threshold for s in scores):
-        return (False, "wrong photo")
     return (True, "accepted")
 
 

@@ -1,5 +1,7 @@
 from datetime import datetime
 
+import pytest
+
 import app.judge as judge
 import app.ollama_client as oc
 
@@ -130,3 +132,37 @@ def test_gate_rejects_when_any_photo_low(monkeypatch):
     passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x", b"y"], _mk_scorer([0.80, 0.05]))
     assert passed is False
     assert reason == "wrong photo"
+
+
+def test_gate_passes_at_exact_threshold(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    monkeypatch.delenv("GRASS_VISION_THRESHOLD", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.20]))
+    assert passed is True  # strict <: equal to threshold passes
+    assert reason == "accepted"
+
+
+def test_gate_enabled_by_default_when_env_unset(monkeypatch):
+    monkeypatch.delenv("GRASS_VISION", raising=False)
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.05]))
+    assert passed is False  # default-on: gate ran and rejected confident-low
+    assert reason == "wrong photo"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, True),
+        ({"GRASS_VISION": "off"}, False),
+        ({"GRASS_MOCK": "1"}, False),
+        ({"GRASS_VISION": "on"}, True),
+    ],
+)
+def test_vision_enabled_env_matrix(monkeypatch, env, expected):
+    monkeypatch.delenv("GRASS_VISION", raising=False)
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert judge.vision_enabled() is expected
