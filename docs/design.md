@@ -41,15 +41,23 @@ Screen time = seconds; the System does the thinking.
   the laptop.
 - Freshness rule: capture timestamp must be >= quest issue timestamp.
 
-## 5. Judge (two tiers)
+## 5. Judge (three tiers)
 
 - Tier 1 rules (instant, deterministic): photo count, freshness, size sanity
   -> skeleton PASS/FAIL. Never depends on the model.
+- Tier 1.5 vision gate (CLIP, CPU): after rules PASS, embeds the quest
+  objective text and each photo, scores similarity. If a photo is
+  *confidently* unrelated to the quest (e.g. a wall for a "pebble" quest),
+  reject as "wrong photo". Lenient by design: ambiguous scores pass, so a
+  doubtful model never bounces a legitimate submission. Runs on CPU so
+  gemma3:4b keeps the 4GB GPU. Gate can only downgrade PASS->FAIL, never
+  upgrade, and never touches narration. On any error the tier is skipped
+  and behavior degrades to Tier-1-only (identical to v1). Toggle:
+  GRASS_VISION=on|off; threshold: GRASS_VISION_THRESHOLD.
+  See docs/superpowers/specs/2026-10-11-vision-tier-design.md.
 - Tier 2 narration (Ollama Gemma, text-only): quest text + evidence metadata
   -> JSON {verdict, line, flavor}. Persona prompt + few-shot bank.
 - Fallback: canned narration bank (also serves as judge-proof demo mode).
-- v1 does NOT understand pixels (4GB VRAM constraint) - owned honestly in
-  the write-up. Roadmap: on-device CLIP tier.
 
 ## 6. Ranks, XP, penalties
 
