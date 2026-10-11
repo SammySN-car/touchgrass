@@ -12,9 +12,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import db, ollama_client, service, state
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 async def get_conn():
@@ -84,3 +90,15 @@ async def read_health():
     mock = ollama_client.mock_mode()
     ollama = ollama_client.reachable() if not mock else False
     return {"ollama": ollama, "mock": mock, "model": ollama_client.DEFAULT_MODEL}
+
+
+@app.get("/")
+async def root():
+    """Serve the single-page frontend from the API origin (same-origin, no CORS)."""
+    return RedirectResponse("/index.html")
+
+
+# Mount static LAST so /api/* routes above take precedence.
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# Also expose index.html + assets at root-relative paths the page expects.
+app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="frontend")
