@@ -84,3 +84,49 @@ def test_narrate_model_agreement_uses_model_line(monkeypatch):
     line, model_used = judge.narrate({"title": "Walk the block"}, META_OK, True)
     assert line == "Outdoors logged."
     assert model_used == oc.DEFAULT_MODEL
+
+
+def _mk_scorer(scores):
+    def scorer(quest_text, images):
+        return list(scores)
+    return scorer
+
+
+def test_vision_gate_rejects_confident_low(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.05]))
+    assert passed is False
+    assert reason == "wrong photo"
+
+
+def test_gate_passes_when_above_threshold(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.55]))
+    assert passed is True
+    assert reason == "accepted"
+
+
+def test_gate_passes_when_ambiguous(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.30]))
+    assert passed is True  # lenient: only confident-low rejects
+    assert reason == "accepted"
+
+
+def test_gate_uses_custom_threshold(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.setenv("GRASS_VISION_THRESHOLD", "0.60")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, _ = judge.vision_gate({"objective": "a pebble"}, [b"x"], _mk_scorer([0.40]))
+    assert passed is False  # 0.40 < 0.60 -> rejected under raised threshold
+
+
+def test_gate_rejects_when_any_photo_low(monkeypatch):
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    passed, reason = judge.vision_gate({"objective": "a pebble"}, [b"x", b"y"], _mk_scorer([0.80, 0.05]))
+    assert passed is False
+    assert reason == "wrong photo"

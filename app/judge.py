@@ -1,11 +1,15 @@
 """Judge: rules tier decides PASS/FAIL; the model tier may only narrate."""
 from __future__ import annotations
 
+import logging
+import os
 import random
 from datetime import datetime, timedelta, timezone
 
 import app.ollama_client
 from app.ollama_client import chat_json, mock_mode
+
+log = logging.getLogger(__name__)
 
 CANNED_PASS = [
     "Evidence accepted. The System remains unimpressed.",
@@ -40,6 +44,43 @@ def _as_aware(ts: str) -> datetime:
         # Naive stamps come from the server's local clock.
         dt = dt.astimezone()
     return dt
+
+
+def vision_enabled() -> bool:
+    """True unless GRASS_VISION=off or GRASS_MOCK=1 (mock skips the gate)."""
+    if os.environ.get("GRASS_MOCK") == "1":
+        return False
+    return os.environ.get("GRASS_VISION", "on") != "off"
+
+
+def _vision_threshold() -> float:
+    raw = os.environ.get("GRASS_VISION_THRESHOLD", "0.20")
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.20
+
+
+def vision_gate(quest: dict, image_bytes: list[bytes], scorer) -> tuple[bool, str]:
+    """Tier 1.5: reject only when similarity is confidently LOW.
+
+    Pure decision function; `scorer(quest_text, images) -> list[float]` is
+    injected so tests never load CLIP. Returns (passed, reason).
+    """
+    if not vision_enabled():
+        return (True, "accepted")
+    if not image_bytes or scorer is None:
+        return (True, "accepted")
+    text = quest.get("objective") or quest.get("title") or ""
+    threshold = _vision_threshold()
+    try:
+        scores = scorer(text, image_bytes)
+    except Exception as exc:  # noqa: BLE001 - gate must never raise
+        log.warning("vision scoring failed, skipping gate: %s", exc)
+        return (True, "accepted")
+    if any(s < threshold for s in scores):
+        return (False, "wrong photo")
+    return (True, "accepted")
 
 
 def rules_verdict(
