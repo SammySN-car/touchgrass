@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import random
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import app.ollama_client
 from app.ollama_client import chat_json, mock_mode
@@ -28,6 +28,20 @@ SYSTEM_PROMPT = (
 )
 
 
+
+def _as_aware(ts: str) -> datetime:
+    """Parse an ISO-8601 stamp into a timezone-aware datetime.
+
+    Handles naive (assumed server-local), trailing-Z (UTC), and numeric
+    offset forms so client (UTC) and server (local) stamps compare correctly.
+    """
+    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        # Naive stamps come from the server's local clock.
+        dt = dt.astimezone()
+    return dt
+
+
 def rules_verdict(
     evidence_meta: list[dict],
     target_count: int,
@@ -40,7 +54,8 @@ def rules_verdict(
         now = datetime.now()
     if len(evidence_meta) < target_count:
         return {"passed": False, "reason": "insufficient evidence"}
-    if any(meta["captured_at"] < issued_at for meta in evidence_meta):
+    if any(_as_aware(meta["captured_at"]) < _as_aware(issued_at)
+           for meta in evidence_meta):
         return {"passed": False, "reason": "stale capture"}
     if now.hour > deadline_hour:
         return {"passed": False, "reason": "deadline exceeded"}
