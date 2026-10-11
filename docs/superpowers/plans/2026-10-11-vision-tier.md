@@ -16,7 +16,7 @@
 - The gate runs on **CPU** (device `"cpu"`), never CUDA — `gemma3:4b` keeps the 4GB GPU.
 - Lenient bias: a photo is rejected only when similarity is *confidently* LOW (below threshold). Ambiguous scores pass. Default threshold `0.20`, overridable via env `GRASS_VISION_THRESHOLD`.
 - Env `GRASS_VISION` (`on`/`off`, default `on`) wholesale-disables the tier. Env `GRASS_MOCK=1` also skips it (consistent with existing mock mode).
-- On ANY gate failure (import error, model load error, scoring error, timeout) the gate is skipped and behavior is identical to current v1. Log a warning; never raise out of the gate.
+- On ANY gate failure (import error, model load error, scoring error) the gate is skipped and behavior is identical to current v1. Log a warning; never raise out of the gate.
 - Existing suite (61 tests) must stay green after every task.
 
 ## Review Focus
