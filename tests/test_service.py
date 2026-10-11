@@ -226,6 +226,7 @@ def test_gate_not_consulted_when_rules_fail(conn, monkeypatch):
         called["n"] += 1
         return [0.99]
 
+    monkeypatch.setattr(service.judge, "vision_enabled", lambda: True)
     monkeypatch.setattr(vision, "get_scorer", lambda: spy)
 
     payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])

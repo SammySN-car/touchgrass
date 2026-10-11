@@ -374,7 +374,7 @@ git commit -m "test: vision gate disable/mock/exception safety guarantees"
 
 **Interfaces:**
 - Consumes: `judge.vision_gate(quest, image_bytes, scorer)`, `vision.get_scorer()`, `judge.vision_enabled()`
-- Produces: submission payloads where a confidently-wrong photo yields `passed=False` and `model_used` reflects the gate (see note); rules-FAIL submissions never consult the gate.
+- Produces: submission payloads where a confidently-wrong photo yields `passed=False`; rules-FAIL submissions never consult the gate.
 
 - [ ] **Step 1: Write the failing test**
 
