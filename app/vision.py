@@ -1,7 +1,8 @@
 """CLIP vision scoring: embeds quest text + photos, returns similarity.
 
 Runs on CPU only so gemma3:4b keeps the GPU. Loaded once into a module-level
-singleton; every failure path returns None so callers can skip the gate.
+singleton; load failures return None so callers can skip the gate, while
+scoring errors propagate to the caller (the gate layer wraps them).
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import io
 
 log = logging.getLogger(__name__)
 
-MODEL_ID = "clip-vit-base-patch32"
+MODEL_ID = "openai/clip-vit-base-patch32"
 _Scorer = Callable[[str, list[bytes]], list[float]]
 
 _SCORER_CACHE: dict = {}
@@ -41,7 +42,7 @@ def _load_scorer_impl():
             img = out.image_embeds / out.image_embeds.norm(dim=-1, keepdim=True)
             txt = out.text_embeds / out.text_embeds.norm(dim=-1, keepdim=True)
             sims = (img @ txt.T).squeeze(-1)
-            return [float(s) for s in sims.tolist()]
+            return [max(0.0, min(1.0, float(s))) for s in sims.tolist()]
 
     return ClipScorer()
 

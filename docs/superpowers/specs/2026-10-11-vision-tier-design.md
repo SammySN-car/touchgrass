@@ -46,7 +46,7 @@ The core guarantee holds: a model cannot award or revoke XP by itself.
 
 ### 3.3 Model & runtime (Option B)
 
-- Model: CLIP `clip-vit-base-patch32` via `transformers` (already installed).
+- Model: CLIP `openai/clip-vit-base-patch32` via `transformers` (already installed).
 - Runs on **CPU**, not the GPU. `gemma3:4b` keeps the 4GB GPU; the two
   models never contend for VRAM.
 - Why CLIP: query-agnostic. It embeds the quest text and each photo into a

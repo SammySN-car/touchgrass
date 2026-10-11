@@ -6,7 +6,7 @@
 
 **Architecture:** New module `app/vision.py` owns CLIP loading + scoring. `judge.vision_gate()` is the pure decision function (injectable scorer for tests). `service.submit_evidence` calls the gate between `rules_verdict` and `narrate`. Any failure skips the gate and degrades to current v1 behavior. Rules stay authoritative; the gate only downgrades PASS->FAIL.
 
-**Tech Stack:** Python 3.13, `transformers` CLIP (`clip-vit-base-patch32`), Pillow (already present), pytest + monkeypatch (existing harness).
+**Tech Stack:** Python 3.13, `transformers` CLIP (`openai/clip-vit-base-patch32`), Pillow (already present), pytest + monkeypatch (existing harness).
 
 **Spec:** `docs/superpowers/specs/2026-10-11-vision-tier-design.md`
 
@@ -107,7 +107,7 @@ import io
 
 log = logging.getLogger(__name__)
 
-MODEL_ID = "clip-vit-base-patch32"
+MODEL_ID = "openai/clip-vit-base-patch32"
 _Scorer = Callable[[str, list[bytes]], list[float]]
 
 _SCORER_CACHE: dict = {}

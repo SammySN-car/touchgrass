@@ -2,6 +2,10 @@ import pytest
 from app import vision
 
 
+def test_model_id_is_canonical_hub_path():
+    assert "/" in vision.MODEL_ID
+
+
 def test_load_impl_returns_scorer_with_score(monkeypatch):
     class FakeScorer:
         def score(self, quest_text, images):
