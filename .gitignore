@@ -8,3 +8,7 @@ dist/
 build/
 .superpowers/
 *.mp4
+
+# local game data + uploaded evidence (never commit)
+grass.db
+evidence/
