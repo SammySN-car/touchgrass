@@ -10,6 +10,7 @@ the service/judge contract; errors map ServiceError -> 409, ValueError -> 422.
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 
 from pathlib import Path
@@ -38,6 +39,24 @@ app = FastAPI(title="SYSTEM://GRASS")
 def _startup() -> None:
     """Ensure schema exists (idempotent) so a deleted/first-run DB self-heals."""
     db.init_db()
+
+
+@app.on_event("startup")
+def _warm_vision_scorer() -> None:
+    """Pre-load the CLIP scorer (~600MB) off the request path.
+
+    Spawns a daemon thread and never joins, so startup (and the first
+    rules-PASS HTTP request) does not block on the load; get_scorer() itself
+    swallows load failures and memoizes them. Skipped when the vision tier is
+    off. vision is imported lazily to keep app import cheap.
+    """
+    try:
+        from app import judge, vision
+
+        if judge.vision_enabled():
+            threading.Thread(target=vision.get_scorer, daemon=True).start()
+    except Exception:  # noqa: BLE001 - warm-up must never fail startup
+        pass
 
 
 def _row_to_dict(row) -> dict | None:

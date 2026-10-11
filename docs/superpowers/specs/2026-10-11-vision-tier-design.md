@@ -93,7 +93,7 @@ unchanged; all server-side.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `GRASS_VISION` | `on` | `off` disables the tier entirely |
-| `GRASS_VISION_THRESHOLD` | high (set in impl) | similarity cutoff for confident reject |
+| `GRASS_VISION_THRESHOLD` | LOW (0.20) | similarity cutoff for confident reject |
 | `GRASS_MOCK` | unset | existing mock mode; also skips vision |
 
 ## 6. Testing strategy

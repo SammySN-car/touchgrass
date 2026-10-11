@@ -6,10 +6,13 @@ exact same code path as in-session ones — the server cannot tell them apart.
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from app import db, state, quests, judge, images
+
+log = logging.getLogger(__name__)
 
 EVIDENCE_DIR = Path(__file__).resolve().parent.parent / "evidence"
 
@@ -133,7 +136,11 @@ def submit_evidence(
                 v_passed, v_reason = judge.vision_gate(quest, jpgs, scorer)
                 if not v_passed:
                     passed = False
-                    verdict = {"passed": False, "reason": v_reason}
+                    log.warning(
+                        "vision gate downgraded quest %s to FAIL: %s",
+                        quest_id,
+                        v_reason,
+                    )
         line, model_used = judge.narrate(quest, meta, passed)
         st = load_state(conn)
         if passed:
