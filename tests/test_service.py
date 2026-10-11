@@ -235,7 +235,7 @@ def test_gate_not_consulted_when_rules_fail(conn, monkeypatch):
 
 
 def test_existing_pass_flow_unchanged_with_gate_default(conn):
-    # GRASS_VISION defaults to on, but no scorer is loaded in tests -> gate inert.
+    # Fixture sets GRASS_MOCK=1, so vision_enabled() is False -> gate skipped.
     day = "2026-11-05"
     quest_id = insert_quest(conn, day, target_count=1)
     payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
@@ -248,6 +248,7 @@ def test_gate_survives_scorer_load_failure(conn, monkeypatch):
     monkeypatch.setenv("GRASS_VISION", "on")
     monkeypatch.delenv("GRASS_MOCK", raising=False)
     monkeypatch.setattr(vision, "get_scorer", lambda: None)  # load failed
+    monkeypatch.setattr(service.judge, "narrate", lambda q, m, p: ("line", "fake-model"))
     day = "2026-11-05"
     quest_id = insert_quest(conn, day, target_count=1)
     payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
