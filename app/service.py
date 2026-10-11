@@ -125,6 +125,15 @@ def submit_evidence(
             meta, quest["target_count"], quest["issued_at"], quest["deadline_hour"]
         )
         passed = bool(verdict["passed"])
+        if passed and judge.vision_enabled():
+            from app import vision
+            scorer = vision.get_scorer()
+            if scorer is not None:
+                jpgs = [p.read_bytes() for p in sorted(EVIDENCE_DIR.glob(f"{quest_id:04d}_*.jpg"))]
+                v_passed, v_reason = judge.vision_gate(quest, jpgs, scorer)
+                if not v_passed:
+                    passed = False
+                    verdict = {"passed": False, "reason": v_reason}
         line, model_used = judge.narrate(quest, meta, passed)
         st = load_state(conn)
         if passed:

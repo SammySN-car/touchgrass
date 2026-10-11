@@ -191,3 +191,43 @@ def test_get_log_newest_first(conn):
     }
     assert entries[0]["title"] == "SKY CHECK"
     assert entries[0]["passed"] == 1
+
+
+def test_gate_downgrades_rules_pass_to_fail(conn, monkeypatch):
+    from app import vision
+
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    monkeypatch.setenv("GRASS_VISION", "on")
+    # Force rules PASS: valid fresh jpeg, target_count=1
+    day = "2026-11-05"
+    quest_id = insert_quest(conn, day, target_count=1)
+
+    monkeypatch.setattr(service.judge, "vision_enabled", lambda: True)
+    monkeypatch.setattr(vision, "get_scorer", lambda: (lambda text, imgs: [0.01]))
+    monkeypatch.setattr(service.judge, "narrate", lambda q, m, p: ("line", "fake-model"))
+
+    payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
+    assert payload["passed"] is False
+    row = conn.execute("SELECT passed FROM verdicts WHERE quest_id = ?", (quest_id,)).fetchone()
+    assert row["passed"] == 0
+
+
+def test_gate_not_consulted_when_rules_fail(conn, monkeypatch):
+    from app import vision
+
+    monkeypatch.setenv("GRASS_VISION", "on")
+    day = "2026-11-05"
+    # target_count=3 but only 1 photo -> rules FAIL (insufficient evidence)
+    quest_id = insert_quest(conn, day, target_count=3)
+
+    called = {"n": 0}
+
+    def spy(text, imgs):
+        called["n"] += 1
+        return [0.99]
+
+    monkeypatch.setattr(vision, "get_scorer", lambda: spy)
+
+    payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
+    assert payload["passed"] is False
+    assert called["n"] == 0  # gate never reached
