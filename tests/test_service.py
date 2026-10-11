@@ -232,3 +232,23 @@ def test_gate_not_consulted_when_rules_fail(conn, monkeypatch):
     payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
     assert payload["passed"] is False
     assert called["n"] == 0  # gate never reached
+
+
+def test_existing_pass_flow_unchanged_with_gate_default(conn):
+    # GRASS_VISION defaults to on, but no scorer is loaded in tests -> gate inert.
+    day = "2026-11-05"
+    quest_id = insert_quest(conn, day, target_count=1)
+    payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
+    assert payload["passed"] is True
+
+
+def test_gate_survives_scorer_load_failure(conn, monkeypatch):
+    from app import vision
+
+    monkeypatch.setenv("GRASS_VISION", "on")
+    monkeypatch.delenv("GRASS_MOCK", raising=False)
+    monkeypatch.setattr(vision, "get_scorer", lambda: None)  # load failed
+    day = "2026-11-05"
+    quest_id = insert_quest(conn, day, target_count=1)
+    payload = service.submit_evidence(conn, quest_id, [tiny_jpeg()], [f"{day}T09:00:00"])
+    assert payload["passed"] is True  # degraded to v1 behavior
