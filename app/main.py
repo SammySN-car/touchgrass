@@ -34,6 +34,12 @@ async def get_conn():
 app = FastAPI(title="SYSTEM://GRASS")
 
 
+@app.on_event("startup")
+def _startup() -> None:
+    """Ensure schema exists (idempotent) so a deleted/first-run DB self-heals."""
+    db.init_db()
+
+
 def _row_to_dict(row) -> dict | None:
     """Plain JSON-ready dict copy of a sqlite3.Row, or None."""
     return dict(row) if row is not None else None
