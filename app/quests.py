@@ -62,15 +62,27 @@ _SYSTEM_PROMPT = (
 )
 
 
+def _shape_weight(target_count: int) -> int:
+    """Multi-photo 'collect N things' templates (target_count > 1) count double
+    so they are issued ~2x less often than single-photo quests. Picking stays
+    least-used on the weighted score: unused templates still score 0, so the
+    14-day no-repeat rotation guarantee is unchanged."""
+    return 2 if target_count > 1 else 1
+
+
 def pick_template(conn) -> tuple:
-    """Least-used bias: count rows in template_usage (missing = 0 uses),
-    find the minimum, choose uniformly at random among tied templates."""
+    """Shape-weighted least-used bias: score each template as
+    times_used * shape_weight (missing = 0 uses), find the minimum score,
+    choose uniformly at random among tied templates."""
     rows = conn.execute(
         "SELECT template_id, times_used FROM template_usage"
     ).fetchall()
     usage = {row["template_id"]: row["times_used"] for row in rows}
-    min_used = min(usage.get(tpl[0], 0) for tpl in TEMPLATES)
-    candidates = [tpl for tpl in TEMPLATES if usage.get(tpl[0], 0) == min_used]
+    scores = {
+        tpl[0]: usage.get(tpl[0], 0) * _shape_weight(tpl[3]) for tpl in TEMPLATES
+    }
+    min_score = min(scores.values())
+    candidates = [tpl for tpl in TEMPLATES if scores[tpl[0]] == min_score]
     return random.choice(candidates)
 
 
