@@ -72,6 +72,7 @@ def _active_db_path() -> Path:
 
 
 def connect() -> sqlite3.Connection:
+    """Establishes a connection to the database using the path provided by _active_db_path(). It configures the connection to use sqlite3.Row as its row factory. The resulting sqlite3.Connection object is then returned."""
     conn = sqlite3.connect(_active_db_path())
     conn.row_factory = sqlite3.Row
     return conn
